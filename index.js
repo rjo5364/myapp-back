@@ -1,6 +1,5 @@
 // Dependencies
 const express = require('express');
-const mongoose = require('mongoose');
 const passport = require('passport');
 const session = require('express-session');
 const bodyParser = require('body-parser');
@@ -22,10 +21,12 @@ const app = express(); // Initializing the Express app
 app.use(bodyParser.json()); // Parses incoming JSON requests
 
 // Allow CORS for your frontend URL
-app.use(cors({ 
-  origin: 'https://myapp-front-69q2.onrender.com', 
-  credentials: true 
-})); // Enables CORS with the frontend URL
+app.use(
+  cors({
+    origin: 'https://myapp-front-69q2.onrender.com',
+    credentials: true,
+  })
+); // Enables CORS with the frontend URL
 
 // Session management configuration
 app.use(
@@ -39,57 +40,27 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// MongoDB connection
-const dbUri = process.env.MONGODB_URI;
-
-if (!dbUri) {
-  console.error('MONGODB_URI is not defined in environment variables.');
-  process.exit(1);
-}
-
-mongoose
-  .connect(dbUri, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log('Connected to MongoDB Atlas'))
-  .catch((err) => console.error('Failed to connect to MongoDB:', err));
-
-// User schema and model
-const userSchema = new mongoose.Schema({
-  socialId: String,
-  name: String,
-  email: String,
-  platform: String,
-  profilePicture: String,
-});
-
-const User = mongoose.model('User', userSchema);
-
 // Google OAuth strategy
 passport.use(
   new GoogleStrategy(
     {
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: 'https://myapp-backend-0125.onrender.com/auth/google/callback', 
+      callbackURL: 'https://myapp-back-n397.onrender.com/auth/google/callback', // Backend callback URL
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        let user = await User.findOne({ socialId: profile.id });
-        if (!user) {
-          user = new User({
-            socialId: profile.id,
-            name: profile.displayName,
-            email: profile.emails[0].value,
-            platform: 'google',
-            profilePicture: profile.photos[0]?.value || '',
-          });
-          await user.save();
-        }
+        // No database; simulate a user object
+        const user = {
+          socialId: profile.id,
+          name: profile.displayName,
+          email: profile.emails[0].value,
+          platform: 'google',
+          profilePicture: profile.photos[0]?.value || '',
+        };
         return done(null, user);
       } catch (err) {
-        console.error('Error saving user:', err);
+        console.error('Error handling user:', err);
         return done(err, null);
       }
     }
@@ -97,15 +68,8 @@ passport.use(
 );
 
 // Serialize and deserialize user
-passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser(async (id, done) => {
-  try {
-    const user = await User.findById(id);
-    done(null, user);
-  } catch (err) {
-    done(err, null);
-  }
-});
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
 
 // Google authentication routes
 app.get(
@@ -159,18 +123,14 @@ app.get('/auth/linkedin/callback', async (req, res) => {
 
     const { sub, name, email, picture } = profileResponse.data;
 
-    let user = await User.findOne({ socialId: sub });
-
-    if (!user) {
-      user = new User({
-        socialId: sub,
-        name: name,
-        email: email || 'No email provided',
-        platform: 'linkedin',
-        profilePicture: picture || '',
-      });
-      await user.save();
-    }
+    // No database; simulate a user object
+    const user = {
+      socialId: sub,
+      name: name,
+      email: email || 'No email provided',
+      platform: 'linkedin',
+      profilePicture: picture || '',
+    };
 
     req.login(user, (err) => {
       if (err) {
@@ -232,5 +192,5 @@ app.use((err, req, res, next) => {
 
 // Start the server
 app.listen(5000, () => {
-  console.log(`Server is running on http://localhost:5000`);
+  console.log(`Server is running on https://myapp-back-n397.onrender.com`);
 });
