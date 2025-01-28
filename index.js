@@ -223,15 +223,17 @@ app.get('/logout', (req, res) => {
   });
 });
 
-// Fallback Route
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../myapp/build', 'index.html'));
-});
+
 
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something went wrong!');
+});
+
+// Fallback Route
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../myapp/build', 'index.html'));
 });
 
 // Start the server
