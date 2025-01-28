@@ -8,6 +8,7 @@ const axios = require('axios');
 const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
+const fs = require('fs');
 
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
@@ -49,6 +50,17 @@ const userSchema = new mongoose.Schema({
 });
 
 const User = mongoose.model('User', userSchema);
+
+// Serve React frontend (only if the build folder exists)
+const frontendPath = path.join(__dirname, '../myapp/build');
+if (fs.existsSync(frontendPath)) {
+  app.use(express.static(frontendPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
+} else {
+  console.warn('Frontend build folder not found. Skipping React frontend serving.');
+}
 
 // Google Strategy
 passport.use(
