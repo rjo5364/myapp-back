@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: myapp-backend
+    env: node
+    buildCommand: "npm install"
+    startCommand: "npm start"
