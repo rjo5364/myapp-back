@@ -52,7 +52,7 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // Serve React frontend (only if the build folder exists)
-const frontendPath = path.join(__dirname, '../myapp/build');
+const frontendPath = path.join(__dirname, '../myapp-front/build');
 if (fs.existsSync(frontendPath)) {
   app.use(express.static(frontendPath));
   app.get('*', (req, res) => {
@@ -203,7 +203,7 @@ app.get('/profile', (req, res) => {
 });
 
 // Serve React frontend
-app.use(express.static(path.join(__dirname, '../myapp/build')));
+app.use(express.static(path.join(__dirname, '../myapp-front/build')));
 
 // Logout Route
 app.get('/logout', (req, res) => {
@@ -233,7 +233,7 @@ app.use((err, req, res, next) => {
 
 // Fallback Route
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../myapp/build', 'index.html'));
+  res.sendFile(path.join(__dirname, '../myapp-front/build', 'index.html'));
 });
 
 // Start the server
