@@ -7,7 +7,7 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const path = require('path');
 const cors = require('cors');
-require('dotenv').config();
+//require('dotenv').config();
 const fs = require('fs');
 
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
