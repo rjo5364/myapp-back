@@ -28,16 +28,18 @@ app.use(
   })
 );
 
+// Session configuration
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
     resave: false,
-    saveUninitialized: true,
-    proxy: true, // Add this for Render.com
+    saveUninitialized: false,
+    proxy: true,
     cookie: { 
       secure: true,
-      sameSite: 'none', // Required for cross-site cookies
-      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      domain: process.env.COOKIE_DOMAIN
     }
   })
 );
@@ -47,7 +49,10 @@ app.use(passport.session());
 
 // MongoDB Atlas connection
 mongoose
-  .connect(process.env.MONGODB_URI)
+  .connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
   .then(() => console.log('Connected to MongoDB Atlas'))
   .catch((err) => console.error('Failed to connect to MongoDB Atlas:', err));
 
@@ -58,20 +63,11 @@ const userSchema = new mongoose.Schema({
   email: String,
   platform: String,
   profilePicture: String,
+  createdAt: { type: Date, default: Date.now },
+  lastLogin: Date
 });
 
 const User = mongoose.model('User', userSchema);
-
-// Serve React frontend (only if the build folder exists)
-const frontendPath = path.join(__dirname, '../myapp-front/build');
-if (fs.existsSync(frontendPath)) {
-  app.use(express.static(frontendPath));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(frontendPath, 'index.html'));
-  });
-} else {
-  console.warn('Frontend build folder not found. Skipping React frontend serving.');
-}
 
 // Google Strategy
 passport.use(
@@ -92,11 +88,13 @@ passport.use(
             email: profile.emails[0].value,
             platform: 'google',
             profilePicture: profile.photos[0]?.value || '',
+            lastLogin: new Date()
           });
-
-          await user.save();
+        } else {
+          user.lastLogin = new Date();
         }
 
+        await user.save();
         return done(null, user);
       } catch (err) {
         console.error('Error saving user:', err);
@@ -126,6 +124,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check route
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'healthy' });
+});
+
 // Google Routes
 app.get(
   '/auth/google',
@@ -142,35 +145,60 @@ app.get(
 
 // LinkedIn Routes
 app.get('/auth/linkedin', (req, res) => {
-  const linkedinAuthURL = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${process.env.LINKEDIN_CLIENT_ID}&redirect_uri=${process.env.LINKEDIN_REDIRECT_URI}&scope=openid%20profile%20email`;
+  const scope = [
+    'openid',
+    'profile',
+    'email',
+    'r_liteprofile',
+    'r_emailaddress'
+  ].join(' ');
+
+  const linkedinAuthURL = `https://www.linkedin.com/oauth/v2/authorization?` +
+    `response_type=code` +
+    `&client_id=${process.env.LINKEDIN_CLIENT_ID}` +
+    `&redirect_uri=${encodeURIComponent(process.env.LINKEDIN_REDIRECT_URI)}` +
+    `&scope=${encodeURIComponent(scope)}` +
+    `&state=${Math.random().toString(36).substring(7)}`;  // Add state parameter for security
+
   res.redirect(linkedinAuthURL);
 });
 
 app.get('/auth/linkedin/callback', async (req, res) => {
   try {
-    const code = req.query.code;
+    const { code, state } = req.query;
 
-    // Step 1: Exchange code for access token
-    const tokenResponse = await axios.post(
-      'https://www.linkedin.com/oauth/v2/accessToken',
-      null,
-      {
-        params: {
-          grant_type: 'authorization_code',
-          code: code,
-          redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
-          client_id: process.env.LINKEDIN_CLIENT_ID,
-          client_secret: process.env.LINKEDIN_CLIENT_SECRET,
-        },
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      }
-    );
+    if (!code) {
+      throw new Error('No authorization code received');
+    }
+
+    // Exchange code for access token
+    const tokenResponse = await axios({
+      method: 'POST',
+      url: 'https://www.linkedin.com/oauth/v2/accessToken',
+      params: {
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
+        client_id: process.env.LINKEDIN_CLIENT_ID,
+        client_secret: process.env.LINKEDIN_CLIENT_SECRET,
+      },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    });
 
     const accessToken = tokenResponse.data.access_token;
 
-    // Step 2: Use access token to fetch user profile
-    const profileResponse = await axios.get(
-      'https://api.linkedin.com/v2/userinfo',
+    // Fetch user profile using v2 API
+    const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    // Fetch email address separately
+    const emailResponse = await axios.get(
+      'https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))',
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -178,38 +206,43 @@ app.get('/auth/linkedin/callback', async (req, res) => {
       }
     );
 
-    const { sub, name, email, picture } = profileResponse.data;
+    const profileData = profileResponse.data;
+    const emailData = emailResponse.data.elements?.[0]?.['handle~']?.emailAddress;
 
-    // Step 3: Save or update user in the database
-    let user = await User.findOne({ socialId: sub });
+    // Create or update user
+    let user = await User.findOne({ socialId: profileData.id });
 
     if (!user) {
       user = new User({
-        socialId: sub,
-        name: name,
-        email: email || 'No email provided',
+        socialId: profileData.id,
+        name: `${profileData.localizedFirstName} ${profileData.localizedLastName}`,
+        email: emailData || 'No email provided',
         platform: 'linkedin',
-        profilePicture: picture || '',
+        profilePicture: profileData.profilePicture?.['displayImage~']?.elements?.[0]?.identifiers?.[0]?.identifier || '',
+        lastLogin: new Date()
       });
-
-      await user.save();
+    } else {
+      user.lastLogin = new Date();
     }
 
-    // Step 4: Log in the user
+    await user.save();
+
+    // Log in the user
     req.login(user, (err) => {
       if (err) {
         console.error('Login error:', err);
-        return res.redirect('/');
+        return res.redirect(`${process.env.FRONTEND_URL}?error=login_failed`);
       }
       res.redirect(`${process.env.FRONTEND_URL}/profile`);
     });
+
   } catch (err) {
     console.error('LinkedIn authentication error:', err);
-    res.redirect('/');
+    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed`);
   }
 });
 
-// Profile Route (returns JSON for frontend)
+// Profile Route
 app.get('/profile', (req, res) => {
   if (!req.isAuthenticated()) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -219,6 +252,8 @@ app.get('/profile', (req, res) => {
     name: req.user.name,
     email: req.user.email,
     profilePicture: req.user.profilePicture,
+    platform: req.user.platform,
+    lastLogin: req.user.lastLogin
   });
 });
 
@@ -234,7 +269,12 @@ app.get('/logout', (req, res) => {
         console.error('Error destroying session:', destroyErr);
         return res.status(500).json({ error: 'Session destroy error' });
       }
-      res.clearCookie('connect.sid', { path: '/' });
+      res.clearCookie('connect.sid', { 
+        path: '/',
+        domain: process.env.COOKIE_DOMAIN,
+        secure: true,
+        sameSite: 'none'
+      });
       res.status(200).json({ message: 'Logged out successfully' });
     });
   });
@@ -243,11 +283,16 @@ app.get('/logout', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).send('Something went wrong!');
+  res.status(500).json({ 
+    error: 'Something went wrong!',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 // Start the server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  console.log(`Frontend URL: ${process.env.FRONTEND_URL}`);
+  console.log(`Base URL: ${process.env.BASE_URL}`);
 });
