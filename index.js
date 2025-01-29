@@ -1,5 +1,4 @@
-// Import required modules
-const express = require('express'); 
+const express = require('express');
 const mongoose = require('mongoose');
 const passport = require('passport');
 const session = require('express-session');
@@ -8,7 +7,6 @@ const axios = require('axios');
 const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
-const fs = require('fs');
 
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
@@ -47,6 +45,17 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Session debugging middleware
+app.use((req, res, next) => {
+  console.log('Session:', {
+    id: req.sessionID,
+    cookie: req.session.cookie,
+    authenticated: req.isAuthenticated(),
+    user: req.user
+  });
+  next();
+});
+
 // MongoDB Atlas connection
 mongoose
   .connect(process.env.MONGODB_URI, {
@@ -76,9 +85,11 @@ passport.use(
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
       callbackURL: `${process.env.BASE_URL}/auth/google/callback`,
+      proxy: true
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
+        console.log('Google profile:', profile);
         let user = await User.findOne({ socialId: profile.id });
 
         if (!user) {
@@ -105,31 +116,27 @@ passport.use(
 );
 
 // Serialize and deserialize user
-passport.serializeUser((user, done) => done(null, user.id));
+passport.serializeUser((user, done) => {
+  console.log('Serializing user:', user);
+  done(null, user.id);
+});
+
 passport.deserializeUser(async (id, done) => {
   try {
     const user = await User.findById(id);
+    console.log('Deserialized user:', user);
     done(null, user);
   } catch (err) {
+    console.error('Deserialize error:', err);
     done(err, null);
   }
 });
 
-// Add headers middleware for all routes
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Credentials', true);
-  res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
-  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  next();
-});
-
-// Health check route
+// Routes
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
-// Google Routes
 app.get(
   '/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
@@ -137,13 +144,16 @@ app.get(
 
 app.get(
   '/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/' }),
+  passport.authenticate('google', { 
+    failureRedirect: '/',
+    failureMessage: true 
+  }),
   (req, res) => {
+    console.log('Google authentication successful, redirecting to:', `${process.env.FRONTEND_URL}/profile`);
     res.redirect(`${process.env.FRONTEND_URL}/profile`);
   }
 );
 
-// LinkedIn Routes
 app.get('/auth/linkedin', (req, res) => {
   const scope = [
     'openid',
@@ -158,7 +168,7 @@ app.get('/auth/linkedin', (req, res) => {
     `&client_id=${process.env.LINKEDIN_CLIENT_ID}` +
     `&redirect_uri=${encodeURIComponent(process.env.LINKEDIN_REDIRECT_URI)}` +
     `&scope=${encodeURIComponent(scope)}` +
-    `&state=${Math.random().toString(36).substring(7)}`;  // Add state parameter for security
+    `&state=${Math.random().toString(36).substring(7)}`;
 
   res.redirect(linkedinAuthURL);
 });
@@ -171,7 +181,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
       throw new Error('No authorization code received');
     }
 
-    // Exchange code for access token
     const tokenResponse = await axios({
       method: 'POST',
       url: 'https://www.linkedin.com/oauth/v2/accessToken',
@@ -189,14 +198,12 @@ app.get('/auth/linkedin/callback', async (req, res) => {
 
     const accessToken = tokenResponse.data.access_token;
 
-    // Fetch user profile using v2 API
     const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
     });
 
-    // Fetch email address separately
     const emailResponse = await axios.get(
       'https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))',
       {
@@ -209,7 +216,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
     const profileData = profileResponse.data;
     const emailData = emailResponse.data.elements?.[0]?.['handle~']?.emailAddress;
 
-    // Create or update user
     let user = await User.findOne({ socialId: profileData.id });
 
     if (!user) {
@@ -227,7 +233,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
 
     await user.save();
 
-    // Log in the user
     req.login(user, (err) => {
       if (err) {
         console.error('Login error:', err);
@@ -242,8 +247,10 @@ app.get('/auth/linkedin/callback', async (req, res) => {
   }
 });
 
-// Profile Route
 app.get('/profile', (req, res) => {
+  console.log('Profile request received. Authenticated:', req.isAuthenticated());
+  console.log('User:', req.user);
+  
   if (!req.isAuthenticated()) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -257,7 +264,6 @@ app.get('/profile', (req, res) => {
   });
 });
 
-// Logout Route
 app.get('/logout', (req, res) => {
   req.logout((err) => {
     if (err) {
@@ -282,7 +288,7 @@ app.get('/logout', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Error:', err);
   res.status(500).json({ 
     error: 'Something went wrong!',
     message: process.env.NODE_ENV === 'development' ? err.message : undefined
