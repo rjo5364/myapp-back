@@ -229,36 +229,31 @@ app.get(
   }
 );
 
-// LinkedIn Routes
 app.get('/auth/linkedin', async (req, res) => {
   try {
     const state = Math.random().toString(36).substring(7);
-    
-    // Save state in session
     req.session.linkedInState = state;
-    console.log('Setting LinkedIn state:', {
-      state,
-      sessionID: req.sessionID,
-    });
 
-    // Explicitly save session
+    // Wait for session to be saved
     await new Promise((resolve, reject) => {
-      req.session.save((err) => {
+      req.session.save(async (err) => {
         if (err) {
           console.error('Session save error:', err);
           reject(err);
         } else {
-          console.log('Session saved successfully');
+          // Add a small delay after save
+          await new Promise(resolve => setTimeout(resolve, 500));
           resolve();
         }
       });
     });
 
-    // Verify state was saved
-    await new Promise(resolve => setTimeout(resolve, 100));
-    console.log('Verifying saved state:', {
+    // Verify the state was saved
+    const verifySession = await sessionStore.get(req.sessionID);
+    console.log('Verified session state:', {
       sessionID: req.sessionID,
-      savedState: req.session.linkedInState
+      linkedInState: verifySession?.linkedInState,
+      state: state
     });
 
     const queryParams = new URLSearchParams({
@@ -270,12 +265,6 @@ app.get('/auth/linkedin', async (req, res) => {
     });
 
     const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams}`;
-    console.log('Redirecting to LinkedIn:', {
-      url: authURL,
-      state,
-      sessionID: req.sessionID
-    });
-    
     res.redirect(authURL);
   } catch (err) {
     console.error('LinkedIn auth error:', err);
