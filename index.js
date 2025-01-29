@@ -27,7 +27,7 @@ app.use(
   })
 );
 
-// Set up MongoDB connection with event listeners
+// MongoDB Connection
 mongoose
   .connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
@@ -48,33 +48,51 @@ mongoose.connection.on('disconnected', () => {
   console.log('MongoDB connection disconnected');
 });
 
-// Initialize MongoDB session store
+// Create session store using existing MongoDB connection
 const sessionStore = MongoStore.create({
-  mongoUrl: process.env.MONGODB_URI,
+  client: mongoose.connection.getClient(),
   collectionName: 'sessions',
   ttl: 24 * 60 * 60,
   autoRemove: 'native',
-  stringify: false,
-  autoRemove: 'native'
+  touchAfter: 24 * 3600
 });
 
-sessionStore.on('error', function(error) {
-  console.error('Session Store Error:', error);
+// Session store event listeners
+sessionStore.on('create', (sessionId) => {
+  console.log('Session created:', sessionId);
+});
+
+sessionStore.on('touch', (sessionId) => {
+  console.log('Session touched:', sessionId);
+});
+
+sessionStore.on('update', (sessionId) => {
+  console.log('Session updated:', sessionId);
+});
+
+sessionStore.on('set', (sessionId) => {
+  console.log('Session set:', sessionId);
+});
+
+sessionStore.on('destroy', (sessionId) => {
+  console.log('Session destroyed:', sessionId);
 });
 
 // Session configuration
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
+    resave: true,
+    saveUninitialized: true,
     proxy: true,
     store: sessionStore,
+    name: 'sessionId',
     cookie: { 
       secure: true,
       sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-      domain: process.env.COOKIE_DOMAIN
+      maxAge: 24 * 60 * 60 * 1000,
+      domain: process.env.COOKIE_DOMAIN,
+      path: '/'
     }
   })
 );
@@ -94,6 +112,22 @@ app.use((req, res, next) => {
     linkedInState: req.session?.linkedInState
   });
   next();
+});
+
+// Test session route
+app.get('/test-session', (req, res) => {
+  req.session.testData = 'test';
+  req.session.save((err) => {
+    if (err) {
+      console.error('Session save error:', err);
+      return res.status(500).json({ error: 'Session save failed' });
+    }
+    res.json({ 
+      sessionID: req.sessionID,
+      sessionData: req.session,
+      store: req.session.store?.constructor.name
+    });
+  });
 });
 
 // User schema
@@ -199,14 +233,32 @@ app.get(
 app.get('/auth/linkedin', async (req, res) => {
   try {
     const state = Math.random().toString(36).substring(7);
+    
+    // Save state in session
     req.session.linkedInState = state;
+    console.log('Setting LinkedIn state:', {
+      state,
+      sessionID: req.sessionID,
+    });
 
-    // Wait for session to be saved
+    // Explicitly save session
     await new Promise((resolve, reject) => {
       req.session.save((err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {
+          console.error('Session save error:', err);
+          reject(err);
+        } else {
+          console.log('Session saved successfully');
+          resolve();
+        }
       });
+    });
+
+    // Verify state was saved
+    await new Promise(resolve => setTimeout(resolve, 100));
+    console.log('Verifying saved state:', {
+      sessionID: req.sessionID,
+      savedState: req.session.linkedInState
     });
 
     const queryParams = new URLSearchParams({
@@ -220,9 +272,10 @@ app.get('/auth/linkedin', async (req, res) => {
     const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams}`;
     console.log('Redirecting to LinkedIn:', {
       url: authURL,
-      state: state,
-      sessionState: req.session.linkedInState
+      state,
+      sessionID: req.sessionID
     });
+    
     res.redirect(authURL);
   } catch (err) {
     console.error('LinkedIn auth error:', err);
@@ -370,7 +423,7 @@ app.get('/logout', (req, res) => {
         console.error('Error destroying session:', destroyErr);
         return res.status(500).json({ error: 'Session destroy error' });
       }
-      res.clearCookie('connect.sid', { 
+      res.clearCookie('sessionId', { 
         path: '/',
         domain: process.env.COOKIE_DOMAIN,
         secure: true,
