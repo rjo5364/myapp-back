@@ -161,74 +161,98 @@ app.get(
 );
 
 app.get('/auth/linkedin', (req, res) => {
-  const scope = [
-    'openid',
-    'profile',
-    'email',
-    'r_liteprofile',
-    'r_emailaddress'
-  ].join(' ');
+  const state = Math.random().toString(36).substring(7);
+  req.session.linkedInState = state;  // Save state in session
+  
+  const scope = ['openid', 'profile', 'email', 'r_liteprofile', 'r_emailaddress'].join(' ');
+  
+  const queryParams = new URLSearchParams({
+    response_type: 'code',
+    client_id: process.env.LINKEDIN_CLIENT_ID,
+    redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
+    state: state,
+    scope: scope
+  });
 
-  const linkedinAuthURL = `https://www.linkedin.com/oauth/v2/authorization?` +
-    `response_type=code` +
-    `&client_id=${process.env.LINKEDIN_CLIENT_ID}` +
-    `&redirect_uri=${encodeURIComponent(process.env.LINKEDIN_REDIRECT_URI)}` +
-    `&scope=${encodeURIComponent(scope)}` +
-    `&state=${Math.random().toString(36).substring(7)}`;
-
-  res.redirect(linkedinAuthURL);
+  const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams.toString()}`;
+  console.log('Redirecting to LinkedIn:', authURL);
+  res.redirect(authURL);
 });
 
 app.get('/auth/linkedin/callback', async (req, res) => {
   try {
-    const { code, state } = req.query;
-
-    if (!code) {
-      throw new Error('No authorization code received');
+    const { code, state, error } = req.query;
+    
+    if (error) {
+      console.error('LinkedIn OAuth error:', error);
+      return res.redirect(`${process.env.FRONTEND_URL}?error=linkedin_auth_failed`);
     }
 
+    // Validate state parameter
+    if (state !== req.session.linkedInState) {
+      console.error('State mismatch in LinkedIn callback');
+      return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_state`);
+    }
+
+    if (!code) {
+      console.error('No code received from LinkedIn');
+      return res.redirect(`${process.env.FRONTEND_URL}?error=no_code`);
+    }
+
+    console.log('LinkedIn callback received. Code:', code, 'State:', state);
+
+    // Exchange code for token
     const tokenResponse = await axios({
       method: 'POST',
       url: 'https://www.linkedin.com/oauth/v2/accessToken',
-      params: {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      data: new URLSearchParams({
         grant_type: 'authorization_code',
-        code,
+        code: code,
         redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
         client_id: process.env.LINKEDIN_CLIENT_ID,
-        client_secret: process.env.LINKEDIN_CLIENT_SECRET,
-      },
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+        client_secret: process.env.LINKEDIN_CLIENT_SECRET
+      }).toString()
     });
 
+    console.log('LinkedIn token response:', tokenResponse.data);
     const accessToken = tokenResponse.data.access_token;
 
-    const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
+    // Get user profile
+    const [profileRes, emailRes] = await Promise.all([
+      axios.get('https://api.linkedin.com/v2/me', {
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      }),
+      axios.get('https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))', {
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      })
+    ]);
+
+    console.log('LinkedIn profile response:', profileRes.data);
+    console.log('LinkedIn email response:', emailRes.data);
+
+    const profileData = profileRes.data;
+    const email = emailRes.data.elements?.[0]?.['handle~']?.emailAddress;
+
+    // Create or update user
+    let user = await User.findOne({ 
+      socialId: profileData.id,
+      platform: 'linkedin'
     });
-
-    const emailResponse = await axios.get(
-      'https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))',
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    const profileData = profileResponse.data;
-    const emailData = emailResponse.data.elements?.[0]?.['handle~']?.emailAddress;
-
-    let user = await User.findOne({ socialId: profileData.id });
 
     if (!user) {
       user = new User({
         socialId: profileData.id,
         name: `${profileData.localizedFirstName} ${profileData.localizedLastName}`,
-        email: emailData || 'No email provided',
+        email: email || 'No email provided',
         platform: 'linkedin',
         profilePicture: profileData.profilePicture?.['displayImage~']?.elements?.[0]?.identifiers?.[0]?.identifier || '',
         lastLogin: new Date()
@@ -238,18 +262,25 @@ app.get('/auth/linkedin/callback', async (req, res) => {
     }
 
     await user.save();
-
+    console.log('User saved:', user);
+    
     req.login(user, (err) => {
       if (err) {
         console.error('Login error:', err);
         return res.redirect(`${process.env.FRONTEND_URL}?error=login_failed`);
       }
+      console.log('LinkedIn authentication successful');
       res.redirect(`${process.env.FRONTEND_URL}/profile`);
     });
 
   } catch (err) {
-    console.error('LinkedIn authentication error:', err);
-    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed`);
+    console.error('LinkedIn authentication error:', {
+      message: err.message,
+      response: err.response?.data,
+      status: err.response?.status,
+      headers: err.response?.headers
+    });
+    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed&reason=${encodeURIComponent(err.message)}`);
   }
 });
 
