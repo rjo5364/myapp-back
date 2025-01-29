@@ -149,8 +149,14 @@ app.get(
     failureMessage: true 
   }),
   (req, res) => {
-    console.log('Google authentication successful, redirecting to:', `${process.env.FRONTEND_URL}/profile`);
-    res.redirect(`${process.env.FRONTEND_URL}/profile`);
+    console.log('Google authentication successful');
+    console.log('Session after auth:', req.session);
+    console.log('User after auth:', req.user);
+    
+    // Add a small delay to ensure session is saved
+    setTimeout(() => {
+      res.redirect(`${process.env.FRONTEND_URL}/profile`);
+    }, 100);
   }
 );
 
