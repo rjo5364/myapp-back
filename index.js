@@ -27,23 +27,49 @@ app.use(
   })
 );
 
-// Session configuration with MongoDB store
+// Set up MongoDB connection with event listeners
+mongoose
+  .connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log('Connected to MongoDB Atlas'))
+  .catch((err) => console.error('Failed to connect to MongoDB Atlas:', err));
+
+mongoose.connection.on('connected', () => {
+  console.log('MongoDB connection established successfully');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('MongoDB connection disconnected');
+});
+
+// Initialize MongoDB session store
+const sessionStore = MongoStore.create({
+  mongoUrl: process.env.MONGODB_URI,
+  collectionName: 'sessions',
+  ttl: 24 * 60 * 60,
+  autoRemove: 'native',
+  stringify: false,
+  autoRemove: 'native'
+});
+
+sessionStore.on('error', function(error) {
+  console.error('Session Store Error:', error);
+});
+
+// Session configuration
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     proxy: true,
-    store: MongoStore.create({
-      mongoUrl: process.env.MONGODB_URI,
-      collectionName: 'sessions',
-      dbName: 'myapp',
-      ttl: 24 * 60 * 60,
-      autoRemove: 'native',
-      crypto: {
-        secret: process.env.SESSION_SECRET
-      }
-    }),
+    store: sessionStore,
     cookie: { 
       secure: true,
       sameSite: 'none',
@@ -64,19 +90,11 @@ app.use((req, res, next) => {
     isAuthenticated: req.isAuthenticated?.(),
     user: req.user,
     cookie: req.session?.cookie,
-    store: req.session?.store?.db ? 'MongoDB' : 'MemoryStore'
+    store: req.session?.store?.constructor.name,
+    linkedInState: req.session?.linkedInState
   });
   next();
 });
-
-// MongoDB Atlas connection
-mongoose
-  .connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log('Connected to MongoDB Atlas'))
-  .catch((err) => console.error('Failed to connect to MongoDB Atlas:', err));
 
 // User schema
 const userSchema = new mongoose.Schema({
@@ -177,36 +195,47 @@ app.get(
   }
 );
 
-// LinkedIn Routes - New Implementation
-app.get('/auth/linkedin', (req, res) => {
-  const state = Math.random().toString(36).substring(7);
-  req.session.linkedInState = state;
+// LinkedIn Routes
+app.get('/auth/linkedin', async (req, res) => {
+  try {
+    const state = Math.random().toString(36).substring(7);
+    req.session.linkedInState = state;
 
-  req.session.save((err) => {
-    if (err) {
-      console.error('Session save error:', err);
-      return res.redirect(`${process.env.FRONTEND_URL}?error=session_error`);
-    }
+    // Wait for session to be saved
+    await new Promise((resolve, reject) => {
+      req.session.save((err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
 
     const queryParams = new URLSearchParams({
       response_type: 'code',
       client_id: process.env.LINKEDIN_CLIENT_ID,
       redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
       state: state,
-      scope: 'openid profile email'  // Updated scopes for new LinkedIn API
+      scope: 'openid profile email'
     });
 
     const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams}`;
-    console.log('Redirecting to LinkedIn:', authURL);
+    console.log('Redirecting to LinkedIn:', {
+      url: authURL,
+      state: state,
+      sessionState: req.session.linkedInState
+    });
     res.redirect(authURL);
-  });
+  } catch (err) {
+    console.error('LinkedIn auth error:', err);
+    res.redirect(`${process.env.FRONTEND_URL}?error=auth_init_failed`);
+  }
 });
 
 app.get('/auth/linkedin/callback', async (req, res) => {
   try {
     console.log('LinkedIn callback received:', {
       query: req.query,
-      sessionState: req.session?.linkedInState
+      sessionState: req.session?.linkedInState,
+      sessionID: req.sessionID
     });
 
     const { code, state, error } = req.query;
@@ -224,7 +253,8 @@ app.get('/auth/linkedin/callback', async (req, res) => {
     if (state !== req.session.linkedInState) {
       console.error('State mismatch:', { 
         received: state, 
-        stored: req.session.linkedInState 
+        stored: req.session.linkedInState,
+        sessionID: req.sessionID 
       });
       return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_state`);
     }
