@@ -5,6 +5,7 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -15,221 +16,102 @@ const app = express();
 // Important: Add trust proxy setting for Render.com
 app.set('trust proxy', 1);
 
-// Comprehensive CORS Configuration
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    // List of allowed origins
-    const allowedOrigins = [
-      process.env.FRONTEND_URL,
-      'https://your-frontend-domain.com', // Add any additional domains
-      /\.yourdomain\.com$/ // Regex for subdomains if needed
-    ];
-    
-    const isAllowed = allowedOrigins.some(allowed => 
-      (typeof allowed === 'string' && origin === allowed) || 
-      (allowed instanceof RegExp && allowed.test(origin))
-    );
-    
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-};
-
 // Middleware
-app.use(cors(corsOptions));
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// User schema
-const userSchema = new mongoose.Schema({
-  socialId: String,
-  name: String,
-  email: String,
-  platform: String,
-  profilePicture: String,
-  createdAt: { type: Date, default: Date.now },
-  lastLogin: Date
-});
-
-const User = mongoose.model('User', userSchema);
-
-// MongoDB Connection with Enhanced Error Handling
-const connectWithRetry = () => {
-  mongoose
-    .connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds
-      socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
-    })
-    .then(() => {
-      console.log('Connected to MongoDB Atlas');
-      // Setup session store after successful connection
-      setupSessionStore();
-    })
-    .catch((err) => {
-      console.error('Failed to connect to MongoDB Atlas:', err);
-      // Retry connection after 5 seconds
-      setTimeout(connectWithRetry, 5000);
-    });
-};
-
-// Session Store Setup
-let sessionStore;
-function setupSessionStore() {
-  sessionStore = MongoStore.create({
-    clientPromise: mongoose.connection.getClient(),
-    dbName: mongoose.connection.db.namespace,
-    collectionName: 'sessions',
-    ttl: 24 * 60 * 60, // 24 hours
-    autoRemove: 'interval',
-    autoRemoveInterval: 10, // Remove expired sessions every 10 minutes
-    touchAfter: 24 * 3600 // only update session if it hasn't been modified for 24 hours
-  });
-
-  // Enhanced Session Store Error Handling
-  sessionStore.on('error', (error) => {
-    console.error('Session Store Error:', error);
-  });
-
-  // Configure session middleware after store is created
-  configureSessionMiddleware();
-}
-
-// Session Configuration Function
-function configureSessionMiddleware() {
-  app.use(
-    session({
-      secret: process.env.SESSION_SECRET,
-      resave: false, // Only save session if modified
-      saveUninitialized: false, // Don't create session until something stored
-      store: sessionStore,
-      name: 'sessionId',
-      cookie: { 
-        secure: true, // Requires HTTPS
-        sameSite: 'none', // For cross-site tracking
-        maxAge: 24 * 60 * 60 * 1000, // 24 hours
-        domain: process.env.COOKIE_DOMAIN,
-        path: '/'
-      }
-    })
-  );
-
-  // Initialize Passport after session middleware
-  app.use(passport.initialize());
-  app.use(passport.session());
-}
-
-// Start the connection
-connectWithRetry();
-
-// Google Strategy with Enhanced Logging and Error Handling
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.BASE_URL}/auth/google/callback`,
-      proxy: true,
-      passReqToCallback: true // Pass the request to the verify callback
-    },
-    async (req, accessToken, refreshToken, profile, done) => {
-      try {
-        console.log('Google Authentication Details:', {
-          profileId: profile.id,
-          displayName: profile.displayName,
-          emails: profile.emails,
-          // Be cautious about logging tokens in production
-        });
-
-        let user = await User.findOne({ 
-          socialId: profile.id, 
-          platform: 'google' 
-        });
-
-        const userData = {
-          socialId: profile.id,
-          name: profile.displayName,
-          email: profile.emails[0]?.value,
-          platform: 'google',
-          profilePicture: profile.photos[0]?.value || '',
-          lastLogin: new Date()
-        };
-
-        if (!user) {
-          user = new User(userData);
-        } else {
-          // Update existing user's information
-          Object.assign(user, userData);
-        }
-
-        await user.save();
-        return done(null, user);
-      } catch (err) {
-        console.error('Google Strategy Error:', {
-          message: err.message,
-          stack: err.stack
-        });
-        return done(err, null);
-      }
-    }
-  )
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true,
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  })
 );
 
-// Enhanced Serialization and Deserialization
-passport.serializeUser((user, done) => {
-  console.log('Serializing User - Full Object:', user);
-  console.log('Serializing User - ID:', user.id);
-  done(null, user.id);
+// MongoDB Connection
+mongoose
+  .connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log('Connected to MongoDB Atlas'))
+  .catch((err) => console.error('Failed to connect to MongoDB Atlas:', err));
+
+mongoose.connection.on('connected', () => {
+  console.log('MongoDB connection established successfully');
 });
 
-passport.deserializeUser(async (id, done) => {
-  try {
-    console.log('Deserializing user with ID:', id);
-    const user = await User.findById(id);
-    
-    if (!user) {
-      console.error('No user found during deserialization for ID:', id);
-      return done(null, false);
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('MongoDB connection disconnected');
+});
+
+// Create session store using existing MongoDB connection
+const sessionStore = MongoStore.create({
+  client: mongoose.connection.getClient(),
+  collectionName: 'sessions',
+  ttl: 24 * 60 * 60,
+  autoRemove: 'native',
+  touchAfter: 24 * 3600
+});
+
+// Session store event listeners
+sessionStore.on('create', (sessionId) => {
+  console.log('Session created:', sessionId);
+});
+
+sessionStore.on('touch', (sessionId) => {
+  console.log('Session touched:', sessionId);
+});
+
+sessionStore.on('update', (sessionId) => {
+  console.log('Session updated:', sessionId);
+});
+
+sessionStore.on('set', (sessionId) => {
+  console.log('Session set:', sessionId);
+});
+
+sessionStore.on('destroy', (sessionId) => {
+  console.log('Session destroyed:', sessionId);
+});
+
+// Session configuration
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: true,
+    saveUninitialized: true,
+    proxy: true,
+    store: sessionStore,
+    name: 'sessionId',
+    cookie: { 
+      secure: true,
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000,
+      domain: process.env.COOKIE_DOMAIN,
+      path: '/'
     }
-    
-    console.log('Deserialized user:', user);
-    done(null, user);
-  } catch (err) {
-    console.error('Deserialization Error:', {
-      message: err.message,
-      stack: err.stack
-    });
-    done(err, null);
-  }
-});
+  })
+);
 
-// Debugging Middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Enhanced session debugging middleware
 app.use((req, res, next) => {
-  console.log('Request Debug:', {
-    path: req.path,
-    method: req.method,
-    headers: req.headers,
+  console.log('Session Debug:', {
     sessionID: req.sessionID,
-    isAuthenticated: req.isAuthenticated(),
+    hasSession: !!req.session,
+    isAuthenticated: req.isAuthenticated?.(),
     user: req.user,
-    sessionData: req.session
+    cookie: req.session?.cookie,
+    store: req.session?.store?.constructor.name,
+    linkedInState: req.session?.linkedInState
   });
   next();
-});
-
-// Routes
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy' });
 });
 
 // Test session route
@@ -246,6 +128,78 @@ app.get('/test-session', (req, res) => {
       store: req.session.store?.constructor.name
     });
   });
+});
+
+// User schema
+const userSchema = new mongoose.Schema({
+  socialId: String,
+  name: String,
+  email: String,
+  platform: String,
+  profilePicture: String,
+  createdAt: { type: Date, default: Date.now },
+  lastLogin: Date
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Google Strategy
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: `${process.env.BASE_URL}/auth/google/callback`,
+      proxy: true
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        console.log('Google profile:', profile);
+        let user = await User.findOne({ socialId: profile.id });
+
+        if (!user) {
+          user = new User({
+            socialId: profile.id,
+            name: profile.displayName,
+            email: profile.emails[0].value,
+            platform: 'google',
+            profilePicture: profile.photos[0]?.value || '',
+            lastLogin: new Date()
+          });
+        } else {
+          user.lastLogin = new Date();
+        }
+
+        await user.save();
+        return done(null, user);
+      } catch (err) {
+        console.error('Error saving user:', err);
+        return done(err, null);
+      }
+    }
+  )
+);
+
+// Serialize and deserialize user
+passport.serializeUser((user, done) => {
+  console.log('Serializing user:', user);
+  done(null, user.id);
+});
+
+passport.deserializeUser(async (id, done) => {
+  try {
+    const user = await User.findById(id);
+    console.log('Deserialized user:', user);
+    done(null, user);
+  } catch (err) {
+    console.error('Deserialize error:', err);
+    done(err, null);
+  }
+});
+
+// Routes
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'healthy' });
 });
 
 // Google Routes
@@ -275,32 +229,36 @@ app.get(
   }
 );
 
-// LinkedIn Authentication Routes
+// LinkedIn Routes
 app.get('/auth/linkedin', async (req, res) => {
   try {
     const state = Math.random().toString(36).substring(7);
+    
+    // Save state in session
     req.session.linkedInState = state;
+    console.log('Setting LinkedIn state:', {
+      state,
+      sessionID: req.sessionID,
+    });
 
-    // Wait for session to be saved
+    // Explicitly save session
     await new Promise((resolve, reject) => {
-      req.session.save(async (err) => {
+      req.session.save((err) => {
         if (err) {
           console.error('Session save error:', err);
           reject(err);
         } else {
-          // Add a small delay after save
-          await new Promise(resolve => setTimeout(resolve, 500));
+          console.log('Session saved successfully');
           resolve();
         }
       });
     });
 
-    // Verify the state was saved
-    const verifySession = await sessionStore.get(req.sessionID);
-    console.log('Verified session state:', {
+    // Verify state was saved
+    await new Promise(resolve => setTimeout(resolve, 100));
+    console.log('Verifying saved state:', {
       sessionID: req.sessionID,
-      linkedInState: verifySession?.linkedInState,
-      state: state
+      savedState: req.session.linkedInState
     });
 
     const queryParams = new URLSearchParams({
@@ -312,6 +270,12 @@ app.get('/auth/linkedin', async (req, res) => {
     });
 
     const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams}`;
+    console.log('Redirecting to LinkedIn:', {
+      url: authURL,
+      state,
+      sessionID: req.sessionID
+    });
+    
     res.redirect(authURL);
   } catch (err) {
     console.error('LinkedIn auth error:', err);
@@ -431,7 +395,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
   }
 });
 
-// Profile Route
 app.get('/profile', (req, res) => {
   console.log('Profile request received. Authenticated:', req.isAuthenticated());
   console.log('User:', req.user);
