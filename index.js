@@ -150,6 +150,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
+// Google Routes
 app.get(
   '/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
@@ -166,7 +167,6 @@ app.get(
     console.log('Session after auth:', req.session);
     console.log('User after auth:', req.user);
     
-    // Save session explicitly before redirect
     req.session.save((err) => {
       if (err) {
         console.error('Session save error:', err);
@@ -177,11 +177,11 @@ app.get(
   }
 );
 
+// LinkedIn Routes - New Implementation
 app.get('/auth/linkedin', (req, res) => {
   const state = Math.random().toString(36).substring(7);
-  req.session.linkedInState = state;  // Save state in session
-  
-  // Save session explicitly before redirect
+  req.session.linkedInState = state;
+
   req.session.save((err) => {
     if (err) {
       console.error('Session save error:', err);
@@ -193,10 +193,10 @@ app.get('/auth/linkedin', (req, res) => {
       client_id: process.env.LINKEDIN_CLIENT_ID,
       redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
       state: state,
-      scope: 'r_liteprofile r_emailaddress'
+      scope: 'openid profile email'  // Updated scopes for new LinkedIn API
     });
 
-    const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams.toString()}`;
+    const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams}`;
     console.log('Redirecting to LinkedIn:', authURL);
     res.redirect(authURL);
   });
@@ -204,14 +204,13 @@ app.get('/auth/linkedin', (req, res) => {
 
 app.get('/auth/linkedin/callback', async (req, res) => {
   try {
-    console.log('LinkedIn callback - Session state:', {
-      sessionID: req.sessionID,
-      hasSession: !!req.session,
-      linkedInState: req.session?.linkedInState
+    console.log('LinkedIn callback received:', {
+      query: req.query,
+      sessionState: req.session?.linkedInState
     });
 
     const { code, state, error } = req.query;
-    
+
     if (error) {
       console.error('LinkedIn OAuth error:', error);
       return res.redirect(`${process.env.FRONTEND_URL}?error=linkedin_auth_failed`);
@@ -222,20 +221,15 @@ app.get('/auth/linkedin/callback', async (req, res) => {
       return res.redirect(`${process.env.FRONTEND_URL}?error=no_session`);
     }
 
-    // Validate state parameter
     if (state !== req.session.linkedInState) {
-      console.error('State mismatch in LinkedIn callback');
+      console.error('State mismatch:', { 
+        received: state, 
+        stored: req.session.linkedInState 
+      });
       return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_state`);
     }
 
-    if (!code) {
-      console.error('No code received from LinkedIn');
-      return res.redirect(`${process.env.FRONTEND_URL}?error=no_code`);
-    }
-
-    console.log('LinkedIn callback received. Code:', code, 'State:', state);
-
-    // Exchange code for token
+    // Exchange code for access token
     const tokenResponse = await axios({
       method: 'POST',
       url: 'https://www.linkedin.com/oauth/v2/accessToken',
@@ -254,45 +248,36 @@ app.get('/auth/linkedin/callback', async (req, res) => {
     console.log('LinkedIn token response:', tokenResponse.data);
     const accessToken = tokenResponse.data.access_token;
 
-    // Get user profile
-    const [profileRes, emailRes] = await Promise.all([
-      axios.get('https://api.linkedin.com/v2/me', {
-        headers: { 
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Restli-Protocol-Version': '2.0.0'
-        }
-      }),
-      axios.get('https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))', {
-        headers: { 
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Restli-Protocol-Version': '2.0.0'
-        }
-      })
-    ]);
+    // Get user info using the userinfo endpoint
+    const userInfoResponse = await axios.get('https://api.linkedin.com/v2/userinfo', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
 
-    console.log('LinkedIn profile response:', profileRes.data);
-    console.log('LinkedIn email response:', emailRes.data);
-
-    const profileData = profileRes.data;
-    const email = emailRes.data.elements?.[0]?.['handle~']?.emailAddress;
+    const profileData = userInfoResponse.data;
+    console.log('LinkedIn user info:', profileData);
 
     // Create or update user
     let user = await User.findOne({ 
-      socialId: profileData.id,
+      socialId: profileData.sub,
       platform: 'linkedin'
     });
 
     if (!user) {
       user = new User({
-        socialId: profileData.id,
-        name: `${profileData.localizedFirstName} ${profileData.localizedLastName}`,
-        email: email || 'No email provided',
+        socialId: profileData.sub,
+        name: profileData.name,
+        email: profileData.email,
         platform: 'linkedin',
-        profilePicture: profileData.profilePicture?.['displayImage~']?.elements?.[0]?.identifiers?.[0]?.identifier || '',
+        profilePicture: profileData.picture || '',
         lastLogin: new Date()
       });
     } else {
       user.lastLogin = new Date();
+      user.name = profileData.name;
+      user.email = profileData.email;
+      user.profilePicture = profileData.picture || user.profilePicture;
     }
 
     await user.save();
@@ -304,7 +289,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
         return res.redirect(`${process.env.FRONTEND_URL}?error=login_failed`);
       }
       
-      // Save session explicitly before redirect
       req.session.save((err) => {
         if (err) {
           console.error('Session save error:', err);
@@ -322,7 +306,9 @@ app.get('/auth/linkedin/callback', async (req, res) => {
       status: err.response?.status,
       headers: err.response?.headers
     });
-    res.redirect(`${process.env.FRONTEND_URL}?error=auth_failed&reason=${encodeURIComponent(err.message)}`);
+    res.redirect(
+      `${process.env.FRONTEND_URL}?error=auth_failed&reason=${encodeURIComponent(err.message)}`
+    );
   }
 });
 
