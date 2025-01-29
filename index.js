@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const passport = require('passport');
 const session = require('express-session');
+const MongoStore = require('connect-mongo');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const path = require('path');
@@ -26,13 +27,23 @@ app.use(
   })
 );
 
-// Session configuration
+// Session configuration with MongoDB store
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     proxy: true,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGODB_URI,
+      collectionName: 'sessions',
+      dbName: 'myapp',
+      ttl: 24 * 60 * 60,
+      autoRemove: 'native',
+      crypto: {
+        secret: process.env.SESSION_SECRET
+      }
+    }),
     cookie: { 
       secure: true,
       sameSite: 'none',
@@ -45,13 +56,15 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Session debugging middleware
+// Enhanced session debugging middleware
 app.use((req, res, next) => {
-  console.log('Session:', {
-    id: req.sessionID,
-    cookie: req.session.cookie,
-    authenticated: req.isAuthenticated(),
-    user: req.user
+  console.log('Session Debug:', {
+    sessionID: req.sessionID,
+    hasSession: !!req.session,
+    isAuthenticated: req.isAuthenticated?.(),
+    user: req.user,
+    cookie: req.session?.cookie,
+    store: req.session?.store?.db ? 'MongoDB' : 'MemoryStore'
   });
   next();
 });
@@ -153,10 +166,14 @@ app.get(
     console.log('Session after auth:', req.session);
     console.log('User after auth:', req.user);
     
-    // Add a small delay to ensure session is saved
-    setTimeout(() => {
+    // Save session explicitly before redirect
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session save error:', err);
+        return res.redirect(`${process.env.FRONTEND_URL}?error=session_error`);
+      }
       res.redirect(`${process.env.FRONTEND_URL}/profile`);
-    }, 100);
+    });
   }
 );
 
@@ -164,28 +181,45 @@ app.get('/auth/linkedin', (req, res) => {
   const state = Math.random().toString(36).substring(7);
   req.session.linkedInState = state;  // Save state in session
   
-  const scope = ['openid', 'profile', 'email', 'r_liteprofile', 'r_emailaddress'].join(' ');
-  
-  const queryParams = new URLSearchParams({
-    response_type: 'code',
-    client_id: process.env.LINKEDIN_CLIENT_ID,
-    redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
-    state: state,
-    scope: scope
-  });
+  // Save session explicitly before redirect
+  req.session.save((err) => {
+    if (err) {
+      console.error('Session save error:', err);
+      return res.redirect(`${process.env.FRONTEND_URL}?error=session_error`);
+    }
 
-  const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams.toString()}`;
-  console.log('Redirecting to LinkedIn:', authURL);
-  res.redirect(authURL);
+    const queryParams = new URLSearchParams({
+      response_type: 'code',
+      client_id: process.env.LINKEDIN_CLIENT_ID,
+      redirect_uri: process.env.LINKEDIN_REDIRECT_URI,
+      state: state,
+      scope: 'r_liteprofile r_emailaddress'
+    });
+
+    const authURL = `https://www.linkedin.com/oauth/v2/authorization?${queryParams.toString()}`;
+    console.log('Redirecting to LinkedIn:', authURL);
+    res.redirect(authURL);
+  });
 });
 
 app.get('/auth/linkedin/callback', async (req, res) => {
   try {
+    console.log('LinkedIn callback - Session state:', {
+      sessionID: req.sessionID,
+      hasSession: !!req.session,
+      linkedInState: req.session?.linkedInState
+    });
+
     const { code, state, error } = req.query;
     
     if (error) {
       console.error('LinkedIn OAuth error:', error);
       return res.redirect(`${process.env.FRONTEND_URL}?error=linkedin_auth_failed`);
+    }
+
+    if (!req.session) {
+      console.error('No session found in LinkedIn callback');
+      return res.redirect(`${process.env.FRONTEND_URL}?error=no_session`);
     }
 
     // Validate state parameter
@@ -269,8 +303,16 @@ app.get('/auth/linkedin/callback', async (req, res) => {
         console.error('Login error:', err);
         return res.redirect(`${process.env.FRONTEND_URL}?error=login_failed`);
       }
-      console.log('LinkedIn authentication successful');
-      res.redirect(`${process.env.FRONTEND_URL}/profile`);
+      
+      // Save session explicitly before redirect
+      req.session.save((err) => {
+        if (err) {
+          console.error('Session save error:', err);
+          return res.redirect(`${process.env.FRONTEND_URL}?error=session_error`);
+        }
+        console.log('LinkedIn authentication successful');
+        res.redirect(`${process.env.FRONTEND_URL}/profile`);
+      });
     });
 
   } catch (err) {
