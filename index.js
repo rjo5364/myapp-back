@@ -14,12 +14,17 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
 const app = express();
 
+// Important: Add trust proxy setting for Render.com
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(bodyParser.json());
 app.use(
   cors({
     origin: process.env.FRONTEND_URL,
     credentials: true,
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Authorization']
   })
 );
 
@@ -28,9 +33,15 @@ app.use(
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: true }, // Set to true for HTTPS in production
+    proxy: true, // Add this for Render.com
+    cookie: { 
+      secure: true,
+      sameSite: 'none', // Required for cross-site cookies
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
   })
 );
+
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -106,6 +117,15 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
+// Add headers middleware for all routes
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Credentials', true);
+  res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  next();
+});
+
 // Google Routes
 app.get(
   '/auth/google',
@@ -116,7 +136,7 @@ app.get(
   '/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
-    res.redirect(`${process.env.FRONTEND_URL}/profile`); // Redirect to frontend after login
+    res.redirect(`${process.env.FRONTEND_URL}/profile`);
   }
 );
 
@@ -181,7 +201,7 @@ app.get('/auth/linkedin/callback', async (req, res) => {
         console.error('Login error:', err);
         return res.redirect('/');
       }
-      res.redirect(`${process.env.FRONTEND_URL}/profile`); // Redirect to frontend after login
+      res.redirect(`${process.env.FRONTEND_URL}/profile`);
     });
   } catch (err) {
     console.error('LinkedIn authentication error:', err);
@@ -202,9 +222,6 @@ app.get('/profile', (req, res) => {
   });
 });
 
-// Serve React frontend
-app.use(express.static(path.join(__dirname, '../myapp-front/build')));
-
 // Logout Route
 app.get('/logout', (req, res) => {
   req.logout((err) => {
@@ -223,20 +240,14 @@ app.get('/logout', (req, res) => {
   });
 });
 
-
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something went wrong!');
 });
 
-// Fallback Route
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../myapp-front/build', 'index.html'));
-});
-
 // Start the server
-app.listen(5000, () => {
-  console.log('Server is running on http://localhost:5000');
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
